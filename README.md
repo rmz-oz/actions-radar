@@ -40,7 +40,8 @@ $ ./radar.py check
 actions-radar: 2 failed run(s)
 ```
 
-On macOS a failure also raises a notification.
+On macOS a failure also raises a notification. A scheduled sweep has nowhere to
+print, so `--report sweep.md` leaves a Markdown summary behind as well.
 
 ## discover
 
@@ -68,7 +69,13 @@ go in `~/.config/actions-radar/`.
 Hourly sweep with cron:
 
 ```
-0 * * * * /usr/bin/python3 /path/to/radar.py check
+0 * * * * /usr/bin/python3 /path/to/radar.py check --report ~/actions-sweep.md
+```
+
+Tests are stdlib only:
+
+```
+python3 -m unittest discover
 ```
 
 ## Why not gh run watch

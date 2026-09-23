@@ -177,6 +177,21 @@ def report(token, repo, run, lines):
             print("  " + "-" * 60)
 
 
+def write_report(path, repos, found):
+    """A sweep from cron or launchd has nowhere to print, so leave a file behind."""
+    lines = ["# Actions sweep %s" % datetime.now().strftime("%Y-%m-%d %H:%M"), ""]
+    if not found:
+        lines.append("%s repositories checked, nothing failed." % len(repos))
+    else:
+        lines.append("%s failed run(s), %s repositories checked." % (len(found), len(repos)))
+        lines += ["", "| Repository | Run | Conclusion |", "| --- | --- | --- |"]
+        for repo, run in found:
+            title = (run.get("display_title") or run.get("name") or "?").replace("|", r"\|")
+            lines.append("| %s | [%s](%s) | %s |"
+                         % (repo, title, run.get("html_url", ""), run.get("conclusion")))
+    Path(path).expanduser().write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def notify(title, message):
     if sys.platform != "darwin" or not shutil.which("osascript"):
         return
@@ -196,13 +211,24 @@ def git(*args):
     return out.stdout.strip() if out.returncode == 0 else ""
 
 
+def repo_from_url(url):
+    """owner/name out of any of the shapes a remote URL comes in."""
+    url = url.strip().rstrip("/")
+    if url.endswith(".git"):
+        url = url[:-4]
+    if url.startswith("git@") or url.startswith("ssh://"):
+        url = url.split(":", 1)[-1].lstrip("/")
+    parts = [p for p in url.split("/") if p]
+    if len(parts) < 2:
+        raise RadarError("Cannot read owner/name out of " + url)
+    return "/".join(parts[-2:])
+
+
 def current_repo():
     url = git("remote", "get-url", "origin")
     if not url:
         raise RadarError("No origin remote, so name the repository.")
-    if url.endswith(".git"):
-        url = url[:-4]
-    return url.split(":", 1)[-1] if url.startswith("git@") else "/".join(url.split("/")[-2:])
+    return repo_from_url(url)
 
 
 def cmd_watch(args):
@@ -275,6 +301,8 @@ def cmd_check(args):
 
     if not args.dry_run:
         write_json(STATE_PATH, state)
+    if args.report:
+        write_report(args.report, repos, found)
 
     if not found:
         print("actions-radar: %s repositories clean" % len(repos))
@@ -336,6 +364,7 @@ def build_parser():
     c.add_argument("repo", nargs="*", help="repositories, defaults to the config file")
     c.add_argument("--per-repo", type=int, default=10, help="runs to inspect (10)")
     c.add_argument("--log-lines", type=int, default=0, help="log excerpt length (0)")
+    c.add_argument("--report", help="also write a Markdown summary to this path")
     c.add_argument("--dry-run", action="store_true", help="do not advance the state")
     c.set_defaults(func=cmd_check)
 
