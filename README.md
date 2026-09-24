@@ -1,5 +1,7 @@
 # actions-radar
 
+[![test](https://github.com/rmz-oz/actions-radar/actions/workflows/test.yml/badge.svg)](https://github.com/rmz-oz/actions-radar/actions/workflows/test.yml)
+
 Tells you when a GitHub Actions run fails.
 
 I had a site deploy break for six days without noticing. My publish script
