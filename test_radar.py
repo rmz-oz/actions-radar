@@ -157,6 +157,16 @@ class FindCauses(unittest.TestCase):
         )
         self.assertEqual(got, ["thread 'feature::f478' (9338) panicked at tests/feature.rs:1195:9:"])
 
+    def test_unittest_failure(self):
+        got = self.causes(
+            "FAIL: test_add (test_calc.Calc.test_add)",
+            "Traceback (most recent call last):",
+            "AssertionError: 4 != 5",
+            "FAILED (failures=1)",
+            "##[error]Process completed with exit code 1.",
+        )
+        self.assertEqual(got, ["FAIL: test_add (test_calc.Calc.test_add)", "AssertionError: 4 != 5"])
+
     def test_strips_colour_codes(self):
         got = self.causes("\x1b[31mError\x1b[39m: ENOENT: no such file", "##[error]Process completed with exit code 1.")
         self.assertEqual(got, ["Error: ENOENT: no such file"])

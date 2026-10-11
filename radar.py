@@ -48,6 +48,7 @@ FAILED_TEST = re.compile(
     r"|^● (?!Validation|Console)\S"         # jest
     r"|^(FAIL|×|✗) +\S+\.(test|spec)\."     # vitest
     r"|^Test Case .* failed"                # xctest
+    r"|^(FAIL|ERROR): \w+ \("              # unittest
     r"|^\s*\d+\) \S"                        # mocha
 )
 ERROR_LINE = re.compile(
