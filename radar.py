@@ -389,6 +389,9 @@ def cmd_watch(args):
     sha = args.sha or git("rev-parse", "HEAD")
     if not sha:
         raise RadarError("Not a git repository, so --sha is required.")
+    if len(sha) < 40:
+        # The runs API only matches a full sha; a short one waits forever.
+        sha = request(token, "/repos/%s/commits/%s" % (repo, sha)).get("sha") or sha
     deadline = time.monotonic() + args.timeout
     # With --json the progress goes to stderr, so stdout stays parseable.
     out = sys.stderr if args.json else sys.stdout
@@ -448,7 +451,7 @@ def cmd_watch(args):
 
 
 def latest_attempts(runs):
-    """A re-run shows up as a new run of the same workflow; only the newest counts."""
+    """A rerun shows up as a new run of the same workflow; only the newest counts."""
     newest = {}
     for r in runs:
         key = r.get("workflow_id") or r.get("name")
@@ -461,7 +464,7 @@ def cmd_check(args):
     token = resolve_token()
     repos = args.repo or load_config().get("repos") or []
     if not repos:
-        raise RadarError("No repositories configured. Run `%s discover` first." % Path(sys.argv[0]).name)
+        raise RadarError("No repositories configured. Run `actions-radar discover` first.")
 
     state = load_state()
     found = []
@@ -536,7 +539,7 @@ def cmd_discover(args):
 
 
 def build_parser():
-    parser = argparse.ArgumentParser(description="Watch GitHub Actions runs.")
+    parser = argparse.ArgumentParser(prog="actions-radar", description="Watch GitHub Actions runs.")
     sub = parser.add_subparsers(dest="command", required=True)
 
     w = sub.add_parser("watch", help="wait for the run of one commit to finish")
