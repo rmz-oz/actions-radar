@@ -9,6 +9,7 @@ Standard library only. The token comes from GITHUB_TOKEN, or from `gh auth token
 """
 
 import argparse
+import http.client
 import io
 import json
 import os
@@ -30,6 +31,43 @@ CONFIG_PATH = CONFIG_DIR / "config.json"
 STATE_PATH = CONFIG_DIR / "state.json"
 
 BAD = {"failure", "timed_out", "startup_failure", "action_required"}
+
+ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+GENERIC = re.compile(r"Process completed with exit code|Final attempt failed|^Error: Process completed")
+NOISE = re.compile(
+    r"^##\[|^shell: |Validation Warning|^● Console|to rerun pass|"
+    r"warning-mode|Deprecated Gradle features|is deprecated\. See https|"
+    r"^\[?command\]|For more on this|^> Run with"
+)
+FAILED_TEST = re.compile(
+    r" > \S.* FAILED$"                      # gradle / junit
+    r"|^FAILED \S+::"                       # pytest summary
+    r"|^--- FAIL: "                         # go test
+    r"|^test \S+ \.\.\. FAILED"             # cargo test
+    r"|^thread '.+'.* panicked at"            # rust
+    r"|^● (?!Validation|Console)\S"         # jest
+    r"|^(FAIL|×|✗) +\S+\.(test|spec)\."     # vitest
+    r"|^Test Case .* failed"                # xctest
+    r"|^\s*\d+\) \S"                        # mocha
+)
+ERROR_LINE = re.compile(
+    r"^E {2,}\S"                                        # pytest assertion
+    r"|^\S+:\d+(:\d+)?:? (fatal )?error\b"              # compiler file:line: error
+    r"|\binternal error\b"
+    r"|\berror(\[E\d+\]| TS\d+)?: "                     # rustc, tsc, swift, generic
+    r"|^(\w+\.)*\w*(Error|Exception)\b(:| while)"       # Python, JS, Java
+    r"|^Error: |^ERROR[: ]|^FATAL|^npm (ERR!|error)"
+    r"|^\* What went wrong:|^Execution failed for task"  # gradle
+    r"|^>+ +(\w+\.)+\w*(Exception|Error)\b"
+    r"|^Caused by:"
+    r"|^\*\* ERROR"
+    r"|Code style issues|would reformat|^Diff in \S+:\d+"
+    r"|^Vulnerability #\d+"
+    r"|\bKilled$|exited with \d+|Timeout \d+ms exceeded|timed out after"
+    r"|\bFound \d+ errors?\b|\bBUILD FAILED\b(?! in)"
+)
+# Java and JS print exceptions all through a passing test run; prefer the summary.
+WEAK = re.compile(r"^(\w+\.)*\w*(Error|Exception)\b|^Caused by:|exited with \d+|^ERROR[: ]")
 
 
 class RadarError(Exception):
@@ -68,6 +106,9 @@ def request(token, path):
         raise RadarError("HTTP %s for %s" % (exc.code, url))
     except urllib.error.URLError as exc:
         raise RadarError("Network error for %s: %s" % (url, exc.reason))
+    except (http.client.HTTPException, OSError) as exc:
+        # GitHub sometimes drops the connection without answering.
+        raise RadarError("Network error for %s: %s" % (url, exc.__class__.__name__))
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -89,13 +130,15 @@ def fetch_log(token, path):
         location = exc.headers.get("Location")
         if not location:
             raise RadarError("Redirect without a location")
+    except (urllib.error.URLError, http.client.HTTPException, OSError) as exc:
+        raise RadarError("Could not reach the log: %s" % exc.__class__.__name__)
 
     plain = urllib.request.Request(location)
     plain.add_header("User-Agent", "actions-radar")
     try:
         with urllib.request.urlopen(plain, timeout=60) as resp:
             return resp.read()
-    except (urllib.error.HTTPError, urllib.error.URLError) as exc:
+    except (urllib.error.URLError, http.client.HTTPException, OSError) as exc:
         raise RadarError("Could not download the log: %s" % exc)
 
 
@@ -128,14 +171,14 @@ def failing_jobs(token, repo, run_id):
     return [j for j in data.get("jobs", []) if j.get("conclusion") in BAD]
 
 
-def log_excerpt(token, repo, job_id, lines):
+def read_log(token, repo, job_id):
     try:
         blob = fetch_log(token, "/repos/%s/actions/jobs/%s/logs" % (repo, job_id))
     except RadarError:
         return ""  # logs expire after 90 days
     if blob[:2] == b"PK":
         blob = unzip(blob)
-    return pick_error(blob.decode("utf-8", errors="replace"), lines)
+    return blob.decode("utf-8", errors="replace")
 
 
 def unzip(blob):
@@ -147,12 +190,96 @@ def unzip(blob):
         return b""
 
 
+def clean_lines(text):
+    out = []
+    for ln in text.splitlines():
+        ln = ANSI.sub("", TIMESTAMP.sub("", ln, count=1)).rstrip()
+        if ln.strip():
+            out.append(ln)
+    return out
+
+
+def failed_step(clean):
+    """The lines of the step that failed, from its "Run" header to the end of the step.
+
+    Jest and others annotate first and print the details after, so the window
+    runs past the last mark until the next step starts.
+    """
+    marks = [i for i, ln in enumerate(clean) if "##[error]" in ln]
+    first = marks[0] if marks else len(clean)
+    end = len(clean)
+    if marks:
+        end = marks[-1] + 1
+        while end < len(clean) and not clean[end].startswith(("##[group]", "Post job cleanup")):
+            end += 1
+    start = 0
+    for i in range(first - 1, -1, -1):
+        if clean[i].startswith("##[group]Run "):
+            start = i
+            break
+    for i in range(start, first):
+        if clean[i].startswith("##[endgroup]"):
+            start = i + 1
+            break
+    return start, end, marks
+
+
+def find_causes(clean, limit=3):
+    """The lines that say what broke: the failing test first, then the first errors.
+
+    Most tools print the reason well above the runner's own "exit code 1" line,
+    so a tail misses it. The patterns come from real logs of pytest, mypy, jest,
+    vitest, cargo, go, gradle, swift, prettier, eslint and docker builds.
+    """
+    start, end, marks = failed_step(clean)
+    window = clean[start:end]
+    # An annotation with its own message is the cause, whatever it looks like.
+    notes = []
+    for i in marks:
+        msg = clean[i].split("##[error]", 1)[1].strip()
+        if msg and not GENERIC.search(msg):
+            notes.append(msg)
+    tests, strong, weak = [], [], []
+    skip = -1
+    for i, ln in enumerate(window):
+        s = ln.strip()
+        if i == skip or "##[error]" in s or NOISE.search(s):
+            continue
+        if FAILED_TEST.search(s):
+            tests.append(s)
+        elif ERROR_LINE.search(s):
+            # "* What went wrong:" and friends say nothing on their own line.
+            if s.endswith(":") and i + 1 < len(window) and len(s) < 40:
+                s = s + " " + window[i + 1].strip()
+                skip = i + 1
+            (weak if WEAK.search(s) else strong).append(s)
+    seen, picked = set(), []
+    # Gradle's "What went wrong" names the task; the "> ...Exception" under it says why.
+    strong.sort(key=lambda s: s.startswith("* What went wrong"))
+    for s in tests[:2] + strong + notes + weak:
+        key = re.sub(r"\d+", "#", s)
+        if key not in seen:
+            seen.add(key)
+            picked.append(s[:200])
+        if len(picked) == limit:
+            break
+    return picked
+
+
 def pick_error(text, lines):
-    """A plain tail shows the runner cleaning up, so anchor on the ##[error] marks."""
-    clean = [TIMESTAMP.sub("", ln, count=1) for ln in text.splitlines() if ln.strip()]
+    """A plain tail shows the runner cleaning up, so anchor on what broke."""
+    clean = clean_lines(text)
     if not clean:
         return ""
-    marks = [i for i, ln in enumerate(clean) if "##[error]" in ln]
+    start, end, marks = failed_step(clean)
+    causes = set(find_causes(clean, limit=50))
+    hits = [i for i in range(start, end) if clean[i].strip()[:200] in causes]
+    if hits:
+        first = max(start, hits[0] - 3)
+        last = min(len(clean) - 1, max(first + lines - 1, hits[0]))
+        if marks and marks[0] <= last + 1:
+            last = marks[-1] if marks[-1] - first < lines else last
+        return "\n".join(clean[first:last + 1])
     if not marks:
         return "\n".join(clean[-lines:])
     first, last = marks[0], marks[-1]
@@ -160,20 +287,44 @@ def pick_error(text, lines):
     return "\n".join(clean[start:last + 1])
 
 
-def report(token, repo, run, lines):
-    print("\n  " + (run.get("display_title") or run.get("name") or "?"))
-    print("  " + run.get("html_url", ""))
+def diagnose(token, repo, run, lines):
+    """Each failed job of a run, with the step, the lines that explain it and a log excerpt."""
+    jobs = []
     for job in failing_jobs(token, repo, run["id"]):
         steps = [s for s in job.get("steps", []) if s.get("conclusion") in BAD]
-        where = steps[0]["name"] if steps else "unknown step"
-        print("  job '%s' failed at step '%s'" % (job["name"], where))
-        if lines <= 0:
-            continue
-        tail = log_excerpt(token, repo, job["id"], lines)
-        if tail:
+        text = read_log(token, repo, job["id"])
+        jobs.append({
+            "job": job["name"],
+            "step": steps[0]["name"] if steps else None,
+            "url": job.get("html_url"),
+            "why": find_causes(clean_lines(text)) if text else [],
+            "log": pick_error(text, lines) if text and lines > 0 else "",
+        })
+    return jobs
+
+
+def run_summary(repo, run, jobs):
+    return {
+        "repo": repo,
+        "title": run.get("display_title") or run.get("name"),
+        "sha": run.get("head_sha"),
+        "conclusion": run.get("conclusion"),
+        "url": run.get("html_url"),
+        "jobs": jobs,
+    }
+
+
+def report(repo, run, jobs):
+    print("\n  " + (run.get("display_title") or run.get("name") or "?"))
+    print("  " + run.get("html_url", ""))
+    for job in jobs:
+        print("  job '%s' failed at step '%s'" % (job["job"], job["step"] or "unknown step"))
+        for line in job["why"]:
+            print("    why: " + line)
+        if job["log"]:
             print("  " + "-" * 60)
-            for line in tail.splitlines():
-                print("  | " + line)
+            for line in job["log"].splitlines():
+                print("  | " + (line if len(line) <= 200 else line[:197] + "..."))
             print("  " + "-" * 60)
 
 
@@ -184,11 +335,12 @@ def write_report(path, repos, found):
         lines.append("%s repositories checked, nothing failed." % len(repos))
     else:
         lines.append("%s failed run(s), %s repositories checked." % (len(found), len(repos)))
-        lines += ["", "| Repository | Run | Conclusion |", "| --- | --- | --- |"]
-        for repo, run in found:
+        lines += ["", "| Repository | Run | Conclusion | Why |", "| --- | --- | --- | --- |"]
+        for repo, run, jobs in found:
             title = (run.get("display_title") or run.get("name") or "?").replace("|", r"\|")
-            lines.append("| %s | [%s](%s) | %s |"
-                         % (repo, title, run.get("html_url", ""), run.get("conclusion")))
+            why = next((j["why"][0] for j in jobs if j["why"]), "").replace("|", r"\|")
+            lines.append("| %s | [%s](%s) | %s | %s |"
+                         % (repo, title, run.get("html_url", ""), run.get("conclusion"), why))
     Path(path).expanduser().write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -238,48 +390,78 @@ def cmd_watch(args):
     if not sha:
         raise RadarError("Not a git repository, so --sha is required.")
     deadline = time.monotonic() + args.timeout
+    # With --json the progress goes to stderr, so stdout stays parseable.
+    out = sys.stderr if args.json else sys.stdout
 
-    print("actions-radar: watching %s @ %s" % (repo, sha[:7]))
-    run = None
-    while run is None:
-        runs = request(token, "/repos/%s/actions/runs?head_sha=%s&per_page=10" % (repo, sha))
-        found = runs.get("workflow_runs", [])
+    print("actions-radar: watching %s @ %s" % (repo, sha[:7]), file=out)
+    runs = []
+    while not runs:
+        data = request(token, "/repos/%s/actions/runs?head_sha=%s&per_page=50" % (repo, sha))
+        runs = latest_attempts(data.get("workflow_runs", []))
         if args.workflow:
-            found = [r for r in found if r.get("name") == args.workflow]
-        if found:
-            run = sorted(found, key=lambda r: r["created_at"])[-1]
-        elif time.monotonic() > deadline:
-            print("  no run was queued for this commit")
+            runs = [r for r in runs if r.get("name") == args.workflow]
+        if runs:
+            break
+        if time.monotonic() > deadline:
+            print("  no run was queued for this commit", file=out)
             return 2
-        else:
-            time.sleep(args.interval)
+        time.sleep(args.interval)
 
     last = None
-    while run.get("status") != "completed":
-        if run.get("status") != last:
-            last = run.get("status")
-            print("  %s ..." % last)
+    while True:
+        pending = [r for r in runs if r.get("status") != "completed"]
+        if not pending:
+            break
+        status = ", ".join(sorted({r.get("status") or "?" for r in pending}))
+        line = "%s ..." % status if len(runs) == 1 else "%s of %s runs %s ..." % (len(pending), len(runs), status)
+        if line != last:
+            last = line
+            print("  " + line, file=out)
         if time.monotonic() > deadline:
-            print("  still %s after %ss: %s" % (last, args.timeout, run.get("html_url")))
+            print("  still %s after %ss" % (status, args.timeout), file=out)
             return 3
         time.sleep(args.interval)
-        run = request(token, "/repos/%s/actions/runs/%s" % (repo, run["id"]))
+        runs = [request(token, "/repos/%s/actions/runs/%s" % (repo, r["id"]))
+                if r.get("status") != "completed" else r for r in runs]
 
-    if run.get("conclusion") == "success":
-        print("  success: " + run.get("html_url", ""))
+    failed = [(r, diagnose(token, repo, r, args.log_lines)) for r in runs if r.get("conclusion") in BAD]
+    if args.json:
+        print(json.dumps({
+            "repo": repo,
+            "sha": sha,
+            "ok": not failed,
+            "failed": [run_summary(repo, r, jobs) for r, jobs in failed],
+            "passed": [r.get("html_url") for r in runs if r.get("conclusion") not in BAD],
+        }, indent=2, ensure_ascii=False))
+    if not failed:
+        for r in runs:
+            print("  %s: %s" % (r.get("conclusion"), r.get("html_url", "")), file=out)
         return 0
 
-    print("  %s:" % run.get("conclusion"))
-    report(token, repo, run, args.log_lines)
-    notify("%s deploy %s" % (repo, run.get("conclusion")), run.get("display_title") or sha[:7])
+    for r, jobs in failed:
+        if not args.json:
+            print("  %s:" % r.get("conclusion"))
+            report(repo, r, jobs)
+    title = failed[0][0].get("display_title") or sha[:7]
+    notify("%s %s" % (repo, failed[0][0].get("conclusion")), title)
     return 1
+
+
+def latest_attempts(runs):
+    """A re-run shows up as a new run of the same workflow; only the newest counts."""
+    newest = {}
+    for r in runs:
+        key = r.get("workflow_id") or r.get("name")
+        if key not in newest or r["created_at"] > newest[key]["created_at"]:
+            newest[key] = r
+    return sorted(newest.values(), key=lambda r: r["created_at"])
 
 
 def cmd_check(args):
     token = resolve_token()
     repos = args.repo or load_config().get("repos") or []
     if not repos:
-        raise RadarError("No repositories configured. Run `radar.py discover` first.")
+        raise RadarError("No repositories configured. Run `%s discover` first." % Path(sys.argv[0]).name)
 
     state = load_state()
     found = []
@@ -299,20 +481,26 @@ def cmd_check(args):
                 found.append((repo, run))
         state[repo] = {"last_run_id": newest, "checked_at": datetime.now(timezone.utc).isoformat()}
 
+    found = [(repo, run, diagnose(token, repo, run, args.log_lines)) for repo, run in found]
     if not args.dry_run:
         write_json(STATE_PATH, state)
     if args.report:
         write_report(args.report, repos, found)
+    if args.json:
+        print(json.dumps([run_summary(repo, run, jobs) for repo, run, jobs in found],
+                         indent=2, ensure_ascii=False))
 
     if not found:
-        print("actions-radar: %s repositories clean" % len(repos))
+        if not args.json:
+            print("actions-radar: %s repositories clean" % len(repos))
         return 0
 
-    print("actions-radar: %s failed run(s)" % len(found))
-    for repo, run in found:
-        print("\n" + repo)
-        report(token, repo, run, args.log_lines)
-    notify("%s failed GitHub Actions run(s)" % len(found), ", ".join(sorted({r for r, _ in found})[:3]))
+    if not args.json:
+        print("actions-radar: %s failed run(s)" % len(found))
+        for repo, run, jobs in found:
+            print("\n" + repo)
+            report(repo, run, jobs)
+    notify("%s failed GitHub Actions run(s)" % len(found), ", ".join(sorted({f[0] for f in found})[:3]))
     return 1
 
 
@@ -348,7 +536,7 @@ def cmd_discover(args):
 
 
 def build_parser():
-    parser = argparse.ArgumentParser(prog="radar.py", description="Watch GitHub Actions runs.")
+    parser = argparse.ArgumentParser(description="Watch GitHub Actions runs.")
     sub = parser.add_subparsers(dest="command", required=True)
 
     w = sub.add_parser("watch", help="wait for the run of one commit to finish")
@@ -358,6 +546,7 @@ def build_parser():
     w.add_argument("--timeout", type=int, default=900, help="seconds to wait (900)")
     w.add_argument("--interval", type=int, default=10, help="poll seconds (10)")
     w.add_argument("--log-lines", type=int, default=30, help="log excerpt length (30)")
+    w.add_argument("--json", action="store_true", help="print the result as JSON, for scripts and agents")
     w.set_defaults(func=cmd_watch)
 
     c = sub.add_parser("check", help="report runs that failed since the last check")
@@ -366,6 +555,7 @@ def build_parser():
     c.add_argument("--log-lines", type=int, default=0, help="log excerpt length (0)")
     c.add_argument("--report", help="also write a Markdown summary to this path")
     c.add_argument("--dry-run", action="store_true", help="do not advance the state")
+    c.add_argument("--json", action="store_true", help="print the failures as JSON")
     c.set_defaults(func=cmd_check)
 
     d = sub.add_parser("discover", help="write a config of repositories using Actions")
