@@ -4,6 +4,8 @@
 
 Tells you when a GitHub Actions run fails, and which line of the log explains it.
 
+![actions-radar watching two commits](docs/demo.gif)
+
 I had a site deploy break for six days without noticing. My publish script
 pushed, printed a link to the Actions tab, and exited. A missing secret killed
 the workflow every time and nothing ever said so.
