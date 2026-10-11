@@ -1,0 +1,10 @@
+{
+  "name": "actions-radar",
+  "version": "0.2.0",
+  "description": "After a git push, waits for GitHub Actions and tells Claude which log line explains a failure.",
+  "author": { "name": "rmz-oz", "url": "https://github.com/rmz-oz" },
+  "homepage": "https://github.com/rmz-oz/actions-radar",
+  "repository": "https://github.com/rmz-oz/actions-radar",
+  "license": "MIT",
+  "keywords": ["github-actions", "ci"]
+}

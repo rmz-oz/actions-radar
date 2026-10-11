@@ -1,0 +1,17 @@
+{
+  "description": "Watch GitHub Actions after git push and wake Claude if a run fails",
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/after_push.py\"",
+            "asyncRewake": true
+          }
+        ]
+      }
+    ]
+  }
+}

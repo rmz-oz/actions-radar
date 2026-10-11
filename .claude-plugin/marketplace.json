@@ -1,0 +1,12 @@
+{
+  "name": "actions-radar",
+  "owner": { "name": "rmz-oz" },
+  "description": "actions-radar for Claude Code",
+  "plugins": [
+    {
+      "name": "actions-radar",
+      "source": ".",
+      "description": "After a git push, waits for GitHub Actions and tells Claude which log line explains a failure."
+    }
+  ]
+}

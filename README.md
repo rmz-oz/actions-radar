@@ -60,6 +60,23 @@ $ actions-radar discover
 scanned 128 repositories, 12 use Actions
 ```
 
+## In Claude Code
+
+Coding agents push and move on, and a failing run sits in the Actions tab like
+it did for me. The repo is also a Claude Code plugin:
+
+```
+/plugin install actions-radar --marketplace rmz-oz/actions-radar
+```
+
+After every `git push` a hook waits for the runs in the background, so Claude
+keeps working. If one fails, Claude is woken with the `why` lines and the run
+link. A skill tells it to fix the cause rather than the workflow, and to hand
+secret and signing problems back to you.
+
+Other agents can call `actions-radar watch --json` after a push and read
+`failed[].jobs[].why`.
+
 ## Setup
 
 Python 3.9 or newer, no dependencies.

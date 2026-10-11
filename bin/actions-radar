@@ -1,0 +1,3 @@
+#!/bin/sh
+# On the PATH of Claude's Bash tool while the plugin is enabled.
+exec python3 "$(dirname "$0")/../radar.py" "$@"

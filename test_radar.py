@@ -6,6 +6,7 @@ whatever GitHub or git decides to send, not the HTTP plumbing.
 """
 
 import http.client
+import sys
 import io
 import tempfile
 import unittest
@@ -14,6 +15,9 @@ from pathlib import Path
 from unittest import mock
 
 import radar
+
+sys.path.insert(0, str(Path(__file__).parent / "hooks"))
+import after_push  # noqa: E402
 
 
 class RepoFromUrl(unittest.TestCase):
@@ -208,6 +212,28 @@ class Network(unittest.TestCase):
         with mock.patch("urllib.request.urlopen", side_effect=http.client.RemoteDisconnected("closed")):
             with self.assertRaises(radar.RadarError):
                 radar.request("t", "/repos/a/b")
+
+
+class AfterPush(unittest.TestCase):
+    def test_spots_a_push(self):
+        for cmd in ("git push", "git push origin main", "git -C ../app push", "cd app && git push -u origin x"):
+            self.assertTrue(after_push.PUSH.search(cmd), cmd)
+        for cmd in ("git status", "echo push", "git pull", "git stash push"):
+            self.assertFalse(after_push.PUSH.search(cmd), cmd)
+
+    def test_finds_where_the_push_ran(self):
+        self.assertEqual(after_push.repo_dir("git push", "/w"), "/w")
+        self.assertEqual(after_push.repo_dir("cd app && git push", "/w"), "/w/app")
+        self.assertEqual(after_push.repo_dir("git -C /abs/app push", "/w"), "/abs/app")
+
+    def test_summary_lists_the_why_lines(self):
+        result = {"repo": "a/b", "sha": "329c32b9", "failed": [{
+            "title": "fix dev", "url": "u",
+            "jobs": [{"job": "typing", "step": "mypy", "why": ["app.py:206: error: x"], "log": ""}],
+        }]}
+        text = after_push.summary(result)
+        self.assertIn("a/b @ 329c32b", text)
+        self.assertIn("why: app.py:206: error: x", text)
 
 
 class Unzip(unittest.TestCase):
