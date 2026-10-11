@@ -208,6 +208,16 @@ class LatestAttempts(unittest.TestCase):
 
 
 class Network(unittest.TestCase):
+    def test_poll_retries_a_dropped_connection(self):
+        calls = [radar.RadarError("Network error"), {"ok": 1}]
+        with mock.patch.object(radar, "request", side_effect=calls), mock.patch("time.sleep"):
+            self.assertEqual(radar.poll("t", "/x", 1), {"ok": 1})
+
+    def test_poll_gives_up_on_not_found(self):
+        with mock.patch.object(radar, "request", side_effect=radar.RadarError("Not found: x")):
+            with self.assertRaises(radar.RadarError):
+                radar.poll("t", "/x", 0)
+
     def test_dropped_connection_is_an_error_not_a_crash(self):
         with mock.patch("urllib.request.urlopen", side_effect=http.client.RemoteDisconnected("closed")):
             with self.assertRaises(radar.RadarError):

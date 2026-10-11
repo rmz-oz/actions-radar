@@ -399,7 +399,7 @@ def cmd_watch(args):
     print("actions-radar: watching %s @ %s" % (repo, sha[:7]), file=out)
     runs = []
     while not runs:
-        data = request(token, "/repos/%s/actions/runs?head_sha=%s&per_page=50" % (repo, sha))
+        data = poll(token, "/repos/%s/actions/runs?head_sha=%s&per_page=50" % (repo, sha), args.interval)
         runs = latest_attempts(data.get("workflow_runs", []))
         if args.workflow:
             runs = [r for r in runs if r.get("name") == args.workflow]
@@ -424,7 +424,7 @@ def cmd_watch(args):
             print("  still %s after %ss" % (status, args.timeout), file=out)
             return 3
         time.sleep(args.interval)
-        runs = [request(token, "/repos/%s/actions/runs/%s" % (repo, r["id"]))
+        runs = [poll(token, "/repos/%s/actions/runs/%s" % (repo, r["id"]), args.interval)
                 if r.get("status") != "completed" else r for r in runs]
 
     failed = [(r, diagnose(token, repo, r, args.log_lines)) for r in runs if r.get("conclusion") in BAD]
@@ -448,6 +448,17 @@ def cmd_watch(args):
     title = failed[0][0].get("display_title") or sha[:7]
     notify("%s %s" % (repo, failed[0][0].get("conclusion")), title)
     return 1
+
+
+def poll(token, path, interval, tries=3):
+    """A watch can last half an hour; one dropped connection should not end it."""
+    for attempt in range(tries):
+        try:
+            return request(token, path)
+        except RadarError as exc:
+            if attempt == tries - 1 or str(exc).startswith(("Not found", "Rate limited")):
+                raise
+            time.sleep(interval)
 
 
 def latest_attempts(runs):
