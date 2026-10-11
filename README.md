@@ -84,11 +84,11 @@ Other agents can call `actions-radar watch --json` after a push and read
 Python 3.9 or newer, no dependencies.
 
 ```
-uvx --from git+https://github.com/rmz-oz/actions-radar actions-radar watch
+pipx install actions-radar
 ```
 
-or `pipx install git+https://github.com/rmz-oz/actions-radar`, or clone the repo
-and run `./radar.py`.
+or run it once with `uvx actions-radar watch`, or clone the repo and run
+`./radar.py`.
 
 The token comes from `GITHUB_TOKEN`, or from the GitHub CLI if you are signed in
 with `gh auth login`. Private repositories need `repo` scope. Config and state
