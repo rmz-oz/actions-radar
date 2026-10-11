@@ -64,17 +64,16 @@ scanned 128 repositories, 12 use Actions
 
 ## In Claude Code
 
-Coding agents push and move on, and a failing run sits in the Actions tab like
-it did for me. The repo is also a Claude Code plugin:
+The repo is also a Claude Code plugin:
 
 ```
 /plugin install actions-radar --marketplace rmz-oz/actions-radar
 ```
 
-After every `git push` a hook waits for the runs in the background, so Claude
-keeps working. If one fails, Claude is woken with the `why` lines and the run
-link. A skill tells it to fix the cause rather than the workflow, and to hand
-secret and signing problems back to you.
+After a `git push`, a hook waits for the runs in the background while Claude
+keeps working. If a run fails, Claude gets the `why` lines and the run link.
+The bundled skill asks it to fix the cause rather than edit the workflow, and
+to leave secrets and signing keys to you.
 
 Other agents can call `actions-radar watch --json` after a push and read
 `failed[].jobs[].why`.
@@ -109,14 +108,20 @@ Tests are stdlib only:
 python3 -m unittest discover
 ```
 
+## Why not GitHub's notifications
+
+GitHub can email you when a run fails, if Actions notifications are on. It
+notifies whoever triggered the run, or whoever created a scheduled workflow, so
+runs started by a teammate, a bot or another account go to them. The email
+says that a run failed; to see why you still open the run and scroll.
+
 ## Why not gh run watch
 
-`gh run watch` is fine if you have the run id and one repository. Right after a
-push the run for your commit does not exist yet, so `watch` polls for the runs
-of a specific commit and waits for all of them. `gh run view --log-failed` gives
-you the whole log; this gives you the line. And nothing in the CLI sweeps many
-repositories and tells you only what is new, which is the part that matters
-once you stop looking at most of your repositories.
+`gh run watch` needs a run id and works on one repository. Right after a push
+the run for your commit may not exist yet, so `watch` here polls for the runs
+of a commit and waits for all of them. `gh run view --log-failed` prints the
+whole failed log; this prints the line. The CLI also has no command that sweeps
+many repositories and reports only new failures.
 
 ## License
 
